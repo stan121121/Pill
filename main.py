@@ -200,7 +200,7 @@ async def start(message: Message, state: FSMContext):
             logger.info(f"Пользователь {message.from_user.id} вернулся")
         else:
             await state.set_state(Onboarding.name)
-            await message.answer("👋 Привет! Я *МедНапоминалка*\n\nКак тебя называть?", parse_mode="Markdown")
+            await message.answer("👋 Привет! Я *МедНапоминалка*\n\nКак к Вам обращаться?", parse_mode="Markdown")
             logger.info(f"Новый пользователь {message.from_user.id}")
     except Exception as e:
         logger.error(f"Ошибка в start: {e}")
@@ -230,7 +230,7 @@ async def cmd_help(message: Message):
 
 *Формат ввода:*
 Время: `08:00, 14:00, 20:00`
-Глюкоза: `5.6 mmol` или `100 mg`
+Глюкоза: `5.4` или `6.2` (ммоль/л)
 Давление: `120/80`
 
 *Поддержка:* @support_bot
@@ -251,7 +251,7 @@ async def callback_help(callback: CallbackQuery):
 
 *Формат ввода:*
 Время: `08:00, 14:00, 20:00`
-Глюкоза: `5.6 mmol` или `100 mg`
+Глюкоза: `5.4` или `6.2` (ммоль/л)
 Давление: `120/80`
     """
     await callback.message.edit_text(help_text, parse_mode="Markdown", reply_markup=back_menu())
@@ -402,33 +402,32 @@ async def delete_med(callback: CallbackQuery):
 async def glucose_start(callback: CallbackQuery, state: FSMContext):
     """Начало добавления глюкозы"""
     await state.set_state(AddGlucose.value)
-    await callback.message.answer("Введите глюкозу: `5.6 mmol` или `100 mg`", parse_mode="Markdown")
+    await callback.message.answer("Введите уровень глюкозы (например: `5.4` или `6.2`)", parse_mode="Markdown")
     await callback.answer()
 
 @dp.message(AddGlucose.value)
 async def glucose_value(message: Message, state: FSMContext):
     """Получение значения глюкозы"""
     try:
-        text = message.text.lower().replace(",", ".")
-        match = re.findall(r"([\d.]+)\s*(mmol|mg)", text)
+        text = message.text.replace(",", ".")
+        
+        # Пытаемся извлечь число
+        match = re.findall(r"(\d+\.?\d*)", text)
         
         if not match:
-            await message.answer("❌ Неверный формат. Используйте: `5.6 mmol` или `100 mg`", parse_mode="Markdown")
+            await message.answer("❌ Неверный формат. Введите число, например: `5.4`", parse_mode="Markdown")
             return
 
-        value, unit = match[0]
-        value = float(value)
+        value = float(match[0])
         
-        # Валидация значений
-        if unit == "mmol" and (value < 0 or value > 50):
-            await message.answer("❌ Недопустимое значение глюкозы")
-            return
-        if unit == "mg" and (value < 0 or value > 900):
-            await message.answer("❌ Недопустимое значение глюкозы")
+        # Валидация значений (mmol/L)
+        if value < 0 or value > 50:
+            await message.answer("❌ Недопустимое значение глюкозы (диапазон: 0-50)")
             return
         
-        mmol = mg_to_mmol(value) if unit == "mg" else value
-        mg = int(mmol_to_mg(value)) if unit == "mmol" else int(value)
+        # Считаем, что значение в mmol/L
+        mmol = value
+        mg = int(mmol_to_mg(mmol))
 
         with get_db_connection() as conn:
             c = conn.cursor()
@@ -575,13 +574,15 @@ async def back_to_main(callback: CallbackQuery):
 # ---------------------
 # Планировщик напоминаний
 # ---------------------
-def recently_taken(conn, user_id: int, name: str) -> bool:
-    """Проверка, не принимали ли лекарство недавно"""
+def recently_taken(conn, user_id: int, med_id: int) -> bool:
+    """Проверка, не отметили ли приём лекарства в последние 15 минут"""
     c = conn.cursor()
-    thirty_mins_ago = (datetime.now() - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+    fifteen_mins_ago = (datetime.now() - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
     c.execute(
-        "SELECT id FROM med_logs WHERE user_id = ? AND med_name LIKE ? AND taken_at > ?",
-        (user_id, f"{name}%", thirty_mins_ago)
+        """SELECT ml.id FROM med_logs ml
+           JOIN medications m ON ml.user_id = m.user_id 
+           WHERE ml.user_id = ? AND m.id = ? AND ml.taken_at > ?""",
+        (user_id, med_id, fifteen_mins_ago)
     )
     return c.fetchone() is not None
 
@@ -606,12 +607,21 @@ async def send_reminders(current_time: str):
             c.execute("SELECT id, user_id, name, dose, times FROM medications")
             meds = c.fetchall()
             
+            logger.info(f"Найдено лекарств в БД: {len(meds)}")
+            
             for med_id, user_id, name, dose, times_str in meds:
-                if current_time in times_str.split(","):
-                    if not recently_taken(conn, user_id, name):
+                times_list = [t.strip() for t in times_str.split(",")]
+                logger.info(f"Лекарство: {name}, время: {times_str}, проверяем {current_time}")
+                
+                if current_time in times_list:
+                    logger.info(f"Совпадение времени! Отправка напоминания пользователю {user_id}")
+                    # Проверяем, не отметили ли недавно
+                    if not recently_taken(conn, user_id, med_id):
                         await send_reminder(user_id, med_id, name, dose)
+                    else:
+                        logger.info(f"Напоминание для пользователя {user_id} пропущено - недавно отмечен приём")
     except Exception as e:
-        logger.error(f"Ошибка в send_reminders: {e}")
+        logger.error(f"Ошибка в send_reminders: {e}", exc_info=True)
 
 async def reminder_loop():
     """Улучшенный планировщик с точной проверкой времени"""
@@ -626,6 +636,7 @@ async def reminder_loop():
             # Отправляем напоминания только раз в минуту
             if current_minute != last_check_minute:
                 last_check_minute = current_minute
+                logger.info(f"Проверка напоминаний для времени: {current_minute}")
                 await send_reminders(current_minute)
             
             # Спим до следующей минуты

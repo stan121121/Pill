@@ -309,7 +309,7 @@ async def glucose_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AddGlucose.value)
     await callback.message.answer(
         "Введите уровень глюкозы:\n"
-        "• `5.6 ` — в ммоль/л\n"
+        "• `5.6 ` — в ммоль/л\n",
         parse_mode="Markdown"
     )
     await callback.answer()

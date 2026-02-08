@@ -574,17 +574,22 @@ async def back_to_main(callback: CallbackQuery):
 # ---------------------
 # Планировщик напоминаний
 # ---------------------
-def recently_taken(conn, user_id: int, med_id: int) -> bool:
+def recently_taken(conn, user_id: int, med_id: int, med_name: str) -> bool:
     """Проверка, не отметили ли приём лекарства в последние 15 минут"""
-    c = conn.cursor()
-    fifteen_mins_ago = (datetime.now() - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
-    c.execute(
-        """SELECT ml.id FROM med_logs ml
-           JOIN medications m ON ml.user_id = m.user_id 
-           WHERE ml.user_id = ? AND m.id = ? AND ml.taken_at > ?""",
-        (user_id, med_id, fifteen_mins_ago)
-    )
-    return c.fetchone() is not None
+    try:
+        c = conn.cursor()
+        fifteen_mins_ago = (datetime.now() - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+        # Проверяем по имени лекарства, так как в med_logs хранится только имя
+        c.execute(
+            "SELECT id FROM med_logs WHERE user_id = ? AND med_name LIKE ? AND taken_at > ?",
+            (user_id, f"{med_name}%", fifteen_mins_ago)
+        )
+        result = c.fetchone() is not None
+        logger.info(f"Проверка недавнего приёма {med_name} для пользователя {user_id}: {'Да' if result else 'Нет'}")
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка в recently_taken: {e}")
+        return False  # В случае ошибки разрешаем отправку
 
 async def send_reminder(user_id: int, med_id: int, name: str, dose: str):
     """Отправка одного напоминания"""
@@ -612,14 +617,17 @@ async def send_reminders(current_time: str):
             for med_id, user_id, name, dose, times_str in meds:
                 times_list = [t.strip() for t in times_str.split(",")]
                 logger.info(f"Лекарство: {name}, время: {times_str}, проверяем {current_time}")
+                logger.info(f"Список времени после split: {times_list}")
                 
                 if current_time in times_list:
-                    logger.info(f"Совпадение времени! Отправка напоминания пользователю {user_id}")
+                    logger.info(f"✅ Совпадение времени! Отправка напоминания пользователю {user_id}")
                     # Проверяем, не отметили ли недавно
-                    if not recently_taken(conn, user_id, med_id):
+                    if not recently_taken(conn, user_id, med_id, name):
                         await send_reminder(user_id, med_id, name, dose)
                     else:
-                        logger.info(f"Напоминание для пользователя {user_id} пропущено - недавно отмечен приём")
+                        logger.info(f"⏭️ Напоминание для пользователя {user_id} пропущено - недавно отмечен приём")
+                else:
+                    logger.debug(f"Нет совпадения: {current_time} не в {times_list}")
     except Exception as e:
         logger.error(f"Ошибка в send_reminders: {e}", exc_info=True)
 
